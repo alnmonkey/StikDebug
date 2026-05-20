@@ -239,8 +239,12 @@ struct ScriptListView: View {
         guard !newFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         var filename = newFileName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !filename.hasSuffix(".js") { filename += ".js" }
+        guard let filename = ScriptStore.normalizedScriptFileName(filename) else {
+            presentError(title: "Failed to Create New Script", message: "Use a simple .js filename without folders.")
+            return
+        }
         do {
-            let newURL = try scriptsDirectory().appendingPathComponent(filename)
+            let newURL = try ScriptStore.scriptURL(named: filename)
             guard !FileManager.default.fileExists(atPath: newURL.path) else {
                 presentError(title: "Failed to Create New Script", message: "A script with the same name already exists.")
                 return
@@ -270,16 +274,25 @@ struct ScriptListView: View {
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
             defer { DispatchQueue.main.async { self.isBusy = false } }
+            let accessing = fileURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessing {
+                    fileURL.stopAccessingSecurityScopedResource()
+                }
+            }
             do {
+                guard let fileName = ScriptStore.normalizedScriptFileName(fileURL.lastPathComponent) else {
+                    throw CocoaError(.fileReadInvalidFileName)
+                }
                 let directory = try self.scriptsDirectory()
-                let dest = directory.appendingPathComponent(fileURL.lastPathComponent)
+                let dest = directory.appendingPathComponent(fileName)
                 if FileManager.default.fileExists(atPath: dest.path) {
                     try FileManager.default.removeItem(at: dest)
                 }
                 try FileManager.default.copyItem(at: fileURL, to: dest)
                 DispatchQueue.main.async {
                     self.loadScripts()
-                    self.presentSuccess(title: "Imported", message: fileURL.lastPathComponent)
+                    self.presentSuccess(title: "Imported", message: fileName)
                 }
             } catch {
                 DispatchQueue.main.async {

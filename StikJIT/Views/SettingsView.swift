@@ -17,7 +17,6 @@ struct SettingsView: View {
     @AppStorage(UserDefaults.Keys.txmOverride) private var overrideTXMDetection = false
     @AppStorage("keepAliveAudio") private var keepAliveAudio = true
     @AppStorage("keepAliveLocation") private var keepAliveLocation = true
-    @AppStorage("customTargetIP") private var customTargetIP = ""
 
     @State private var isShowingPairingFilePicker = false
     @State private var isImportingFile = false
@@ -126,10 +125,8 @@ struct SettingsView: View {
                     HStack {
                         Text("Target Device IP")
                         Spacer()
-                        TextField("10.7.0.1", text: $customTargetIP)
-                            .multilineTextAlignment(.trailing)
-                            .keyboardType(.numbersAndPunctuation)
-                            .submitLabel(.done)
+                        Text(DeviceConnectionContext.defaultTargetIPAddress)
+                            .foregroundStyle(.secondary)
                     }
                     Button { openAppFolder() } label: {
                         Label("App Folder", systemImage: "folder")

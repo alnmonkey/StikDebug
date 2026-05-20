@@ -1060,13 +1060,25 @@ enum AppIconRepository {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
             return nil
         }
+        guard let fileName = cacheFileName(for: bundleID) else {
+            return nil
+        }
         let directory = container.appendingPathComponent("icons", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
             return nil
         }
-        return directory.appendingPathComponent("\(bundleID).png")
+        return directory.appendingPathComponent(fileName)
+    }
+
+    private static func cacheFileName(for bundleID: String) -> String? {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+        let sanitized = String(bundleID.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "_"
+        })
+        guard !sanitized.isEmpty else { return nil }
+        return "\(sanitized).png"
     }
 
     private static func memoryCost(for image: UIImage) -> Int {

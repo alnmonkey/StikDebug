@@ -776,8 +776,7 @@ struct LocationSimulationView: View {
     }
 
     private var deviceIP: String {
-        let stored = UserDefaults.standard.string(forKey: "customTargetIP") ?? ""
-        return stored.isEmpty ? "10.7.0.1" : stored
+        DeviceConnectionContext.targetIPAddress
     }
 
     private var routeStartCoordinate: CLLocationCoordinate2D? {

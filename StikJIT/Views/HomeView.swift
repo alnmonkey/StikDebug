@@ -15,6 +15,78 @@ struct JITEnableConfiguration {
     var scriptName : String? = nil
 }
 
+private enum ExternalURLAction: Identifiable {
+    case enableJIT(JITEnableConfiguration)
+    case killProcess(Int)
+    case launchApp(String)
+
+    var id: String {
+        switch self {
+        case .enableJIT(let config):
+            return "enable-\(config.bundleID ?? "")-\(config.pid ?? 0)-\(config.scriptName ?? "")"
+        case .killProcess(let pid):
+            return "kill-\(pid)"
+        case .launchApp(let bundleID):
+            return "launch-\(bundleID)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .enableJIT:
+            return "Enable JIT?"
+        case .killProcess:
+            return "Kill Process?"
+        case .launchApp:
+            return "Launch App?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .enableJIT(let config):
+            let scriptText = config.scriptData == nil ? "" : " and run a script"
+            return "An external link wants to enable JIT\(scriptText) for \(targetDescription(for: config))."
+        case .killProcess(let pid):
+            return "An external link wants to kill process \(pid)."
+        case .launchApp(let bundleID):
+            return "An external link wants to launch \(bundleID)."
+        }
+    }
+
+    var confirmationTitle: String {
+        switch self {
+        case .enableJIT(let config):
+            return config.scriptData == nil ? "Enable JIT" : "Enable and Run Script"
+        case .killProcess:
+            return "Kill Process"
+        case .launchApp:
+            return "Launch App"
+        }
+    }
+
+    var role: ButtonRole? {
+        switch self {
+        case .enableJIT(let config):
+            return config.scriptData == nil ? nil : .destructive
+        case .killProcess:
+            return .destructive
+        case .launchApp:
+            return nil
+        }
+    }
+
+    private func targetDescription(for config: JITEnableConfiguration) -> String {
+        if let bundleID = config.bundleID {
+            return bundleID
+        }
+        if let pid = config.pid {
+            return "process \(pid)"
+        }
+        return "the requested app"
+    }
+}
+
 private final class DebugKeepAliveLease {
     private let stateLock = NSLock()
     private var isActive = false
@@ -81,6 +153,7 @@ struct HomeView: View {
     @State private var pendingJITEnableConfiguration : JITEnableConfiguration? = nil
     @State private var isShowingPairingFilePicker = false
     @State private var debugFeedback: DebugFeedback?
+    @State private var pendingExternalURLAction: ExternalURLAction?
 
     @State var scriptViewShow = false
     @State private var isShowingConsole = false
@@ -133,64 +206,30 @@ struct HomeView: View {
             }
         }
         .onOpenURL { url in
-            guard let host = url.host()?.lowercased() else { return }
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            switch host {
-            case "enable-jit":
-                var config = JITEnableConfiguration()
-                if let pidStr = queryValue(["pid"], in: components), let pid = Int(pidStr) {
-                    config.pid = pid
-                }
-                if let bundleId = queryValue(["bundle-id", "bundleID", "bundle_id", "bundleId"], in: components) {
-                    config.bundleID = bundleId
-                }
-                if let scriptBase64URL = queryValue(["script-data", "scriptData", "script_data"], in: components)?.removingPercentEncoding {
-                    let base64 = base64URLToBase64(scriptBase64URL)
-                    if let scriptData = Data(base64Encoded: base64) {
-                        config.scriptData = scriptData
+            handleExternalURL(url)
+        }
+        .confirmationDialog(
+            pendingExternalURLAction?.title ?? "External Request",
+            isPresented: Binding(
+                get: { pendingExternalURLAction != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingExternalURLAction = nil
                     }
                 }
-                if let scriptName = queryValue(["script-name", "scriptName", "script_name"], in: components) {
-                    config.scriptName = scriptName
-                }
-                if config.scriptData == nil, let bundleID = config.bundleID,
-                   let scriptInfo = ScriptStore.preferredScript(for: bundleID) {
-                    config.scriptData = scriptInfo.data
-                    config.scriptName = scriptInfo.name
-                }
-                if viewDidAppeared {
-                    startJITInBackground(bundleID: config.bundleID, pid: config.pid, scriptData: config.scriptData, scriptName: config.scriptName, triggeredByURLScheme: true)
-                } else {
-                    pendingJITEnableConfiguration = config
-                }
-            case "kill-process":
-                if let pidStr = queryValue(["pid"], in: components), let pid = Int(pidStr) {
-                    pubTunnelConnected = false
-                    startTunnelInBackground(showErrorUI: false)
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        sleep(1)
-                        do {
-                            try JITEnableContext.shared.killProcess(withPID: Int32(pid))
-                            DispatchQueue.main.async {
-                                LogManager.shared.addInfoLog("Killed process \(pid) via URL scheme")
-                            }
-                        } catch {
-                            DispatchQueue.main.async {
-                                LogManager.shared.addErrorLog("Failed to kill process \(pid): \(error.localizedDescription)")
-                            }
-                        }
-                    }
-                }
-            case "launch-app":
-                if let bundleId = queryValue(["bundle-id", "bundleID", "bundle_id", "bundleId"], in: components) {
-                    HapticFeedbackHelper.trigger()
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let _ = JITEnableContext.shared.launchAppWithoutDebug(bundleId, logger: nil)
-                    }
-                }
-            default:
-                break
+            ),
+            titleVisibility: .visible,
+            presenting: pendingExternalURLAction
+        ) { action in
+            Button(action.confirmationTitle, role: action.role) {
+                performExternalURLAction(action)
+                pendingExternalURLAction = nil
             }
+            Button("Cancel", role: .cancel) {
+                pendingExternalURLAction = nil
+            }
+        } message: { action in
+            Text(action.message)
         }
         .fileImporter(isPresented: $isShowingPairingFilePicker, allowedContentTypes: PairingFileStore.supportedContentTypes) { result in
             switch result {
@@ -254,6 +293,85 @@ struct HomeView: View {
             }
         }
         return nil
+    }
+
+    private func handleExternalURL(_ url: URL) {
+        guard let host = url.host()?.lowercased() else { return }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+
+        switch host {
+        case "enable-jit":
+            var config = JITEnableConfiguration()
+            if let pidStr = queryValue(["pid"], in: components), let pid = Int(pidStr) {
+                config.pid = pid
+            }
+            if let bundleId = queryValue(["bundle-id", "bundleID", "bundle_id", "bundleId"], in: components) {
+                config.bundleID = bundleId
+            }
+            if let scriptBase64URL = queryValue(["script-data", "scriptData", "script_data"], in: components)?.removingPercentEncoding {
+                let base64 = base64URLToBase64(scriptBase64URL)
+                if let scriptData = Data(base64Encoded: base64) {
+                    config.scriptData = scriptData
+                }
+            }
+            if let scriptName = queryValue(["script-name", "scriptName", "script_name"], in: components) {
+                config.scriptName = scriptName
+            }
+            if config.scriptData == nil, let bundleID = config.bundleID,
+               let scriptInfo = ScriptStore.preferredScript(for: bundleID) {
+                config.scriptData = scriptInfo.data
+                config.scriptName = scriptInfo.name
+            }
+            pendingExternalURLAction = .enableJIT(config)
+        case "kill-process":
+            if let pidStr = queryValue(["pid"], in: components), let pid = Int(pidStr) {
+                pendingExternalURLAction = .killProcess(pid)
+            }
+        case "launch-app":
+            if let bundleId = queryValue(["bundle-id", "bundleID", "bundle_id", "bundleId"], in: components) {
+                pendingExternalURLAction = .launchApp(bundleId)
+            }
+        default:
+            break
+        }
+    }
+
+    private func performExternalURLAction(_ action: ExternalURLAction) {
+        switch action {
+        case .enableJIT(let config):
+            if viewDidAppeared {
+                startJITInBackground(
+                    bundleID: config.bundleID,
+                    pid: config.pid,
+                    scriptData: config.scriptData,
+                    scriptName: config.scriptName,
+                    triggeredByURLScheme: true
+                )
+            } else {
+                pendingJITEnableConfiguration = config
+            }
+        case .killProcess(let pid):
+            pubTunnelConnected = false
+            startTunnelInBackground(showErrorUI: false)
+            DispatchQueue.global(qos: .userInitiated).async {
+                sleep(1)
+                do {
+                    try JITEnableContext.shared.killProcess(withPID: Int32(pid))
+                    DispatchQueue.main.async {
+                        LogManager.shared.addInfoLog("Killed process \(pid) via URL scheme")
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        LogManager.shared.addErrorLog("Failed to kill process \(pid): \(error.localizedDescription)")
+                    }
+                }
+            }
+        case .launchApp(let bundleID):
+            HapticFeedbackHelper.trigger()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let _ = JITEnableContext.shared.launchAppWithoutDebug(bundleID, logger: nil)
+            }
+        }
     }
 
     private func debugFeedbackView(_ feedback: DebugFeedback) -> some View {

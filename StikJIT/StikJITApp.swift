@@ -317,7 +317,7 @@ func startTunnelInBackground(showErrorUI: Bool = true) {
         } catch {
             let err2 = error as NSError
             let code = err2.code
-            LogManager.shared.addErrorLog("\(error.localizedDescription) (Code: \(code))")
+            LogManager.shared.addErrorLog(tunnelConnectionLogMessage(for: err2))
             guard showErrorUI else { return }
             DispatchQueue.main.async {
                 if code == -9 {
@@ -340,7 +340,7 @@ func startTunnelInBackground(showErrorUI: Bool = true) {
                 } else {
                     showAlert(
                         title: "Connection Error",
-                        message: "\(error.localizedDescription)\n\nMake sure Wi‑Fi and LocalDevVPN are connected and that the device is reachable.",
+                        message: tunnelConnectionAlertMessage(for: err2),
                         showOk: false,
                         showTryAgain: true
                     ) { shouldTryAgain in
@@ -356,6 +356,82 @@ func startTunnelInBackground(showErrorUI: Bool = true) {
     }
     
 
+}
+
+private func tunnelConnectionLogMessage(for error: NSError) -> String {
+    let target = "\(DeviceConnectionContext.targetIPAddress):49152"
+    return "Tunnel connection failed for \(target): \(error.localizedDescription) (Domain: \(error.domain), Code: \(error.code), Raw: \(String(describing: error)))"
+}
+
+private func tunnelConnectionAlertMessage(for error: NSError) -> String {
+    let targetIP = DeviceConnectionContext.targetIPAddress
+    let rawMessage = error.localizedDescription
+    let lowercasedMessage = rawMessage.lowercased()
+
+    let likelyCause: String
+    let recoverySteps: [String]
+
+    if error.code == 48 || lowercasedMessage.contains("address already in use") || lowercasedMessage.contains("port already in use") {
+        likelyCause = "A port needed for the tunnel is already in use."
+        recoverySteps = [
+            "Close other JIT, debugging, proxy, or VPN apps that may be using the tunnel.",
+            "Disconnect and reconnect LocalDevVPN.",
+            "Restart StikDebug, then try again.",
+            "If it keeps happening, reboot the device to clear the stuck port."
+        ]
+    } else if error.code == 54 || lowercasedMessage.contains("connection reset") {
+        likelyCause = "The device or VPN closed the tunnel connection before setup finished."
+        recoverySteps = [
+            "Open LocalDevVPN and confirm the VPN is connected.",
+            "Make sure LocalDevVPN is using the default \(DeviceConnectionContext.defaultTargetIPAddress) address.",
+            "Reconnect Wi-Fi and LocalDevVPN, then try again.",
+            "If this keeps happening, select a fresh pairing file."
+        ]
+    } else if error.code == -18 || lowercasedMessage.contains("parse target ip") {
+        likelyCause = "The configured target IP address is not valid."
+        recoverySteps = [
+            "Open Settings and check the target IP address.",
+            "Use the default \(DeviceConnectionContext.defaultTargetIPAddress)."
+        ]
+    } else if lowercasedMessage.contains("timed out") || lowercasedMessage.contains("timeout") {
+        likelyCause = "The app could not reach the device before the connection timed out."
+        recoverySteps = [
+            "Confirm Wi-Fi and LocalDevVPN are both connected.",
+            "Wake and unlock the target device.",
+            "Confirm LocalDevVPN is exposing the device at \(targetIP)."
+        ]
+    } else if lowercasedMessage.contains("network is unreachable") || lowercasedMessage.contains("no route") {
+        likelyCause = "The VPN route to the device is not available."
+        recoverySteps = [
+            "Disconnect and reconnect LocalDevVPN.",
+            "Confirm iOS shows the VPN indicator.",
+            "Try switching Wi-Fi off and on."
+        ]
+    } else {
+        likelyCause = "The tunnel could not be created."
+        recoverySteps = [
+            "Confirm Wi-Fi and LocalDevVPN are connected.",
+            "Wake and unlock the target device.",
+            "Reconnect LocalDevVPN, then try again."
+        ]
+    }
+
+    let steps = recoverySteps.enumerated()
+        .map { "\($0.offset + 1). \($0.element)" }
+        .joined(separator: "\n")
+
+    return """
+    \(likelyCause)
+
+    Target: \(targetIP):49152
+    Expected LocalDevVPN IP: \(DeviceConnectionContext.defaultTargetIPAddress)
+
+    Try this:
+    \(steps)
+
+    Technical details:
+    Code \(error.code): \(rawMessage)
+    """
 }
 
 func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
@@ -463,20 +539,33 @@ private let ddiDownloadItems: [DDIDownloadItem] = [
 
 enum DDIDownloadError: LocalizedError {
     case invalidURL(String)
+    case invalidResponse
+    case badStatus(Int)
     
     var errorDescription: String? {
         switch self {
         case .invalidURL(let string):
             return "Invalid download URL: \(string)"
+        case .invalidResponse:
+            return "The DDI server returned an invalid response."
+        case .badStatus(let statusCode):
+            return "The DDI server returned HTTP \(statusCode)."
         }
     }
 }
 
 func downloadFile(from urlString: String, to destinationURL: URL) async throws {
-    guard let url = URL(string: urlString) else {
+    guard let url = URL(string: urlString),
+          url.scheme?.lowercased() == "https" else {
         throw DDIDownloadError.invalidURL(urlString)
     }
-    let (tempLocalUrl, _) = try await URLSession.shared.download(from: url)
+    let (tempLocalUrl, response) = try await URLSession.shared.download(from: url)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw DDIDownloadError.invalidResponse
+    }
+    guard (200..<300).contains(httpResponse.statusCode) else {
+        throw DDIDownloadError.badStatus(httpResponse.statusCode)
+    }
     let fileManager = FileManager.default
     try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(),
                                     withIntermediateDirectories: true)

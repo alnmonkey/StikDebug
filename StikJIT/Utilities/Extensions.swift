@@ -26,28 +26,43 @@ enum PairingFileStore {
     ]
 
     static var url: URL {
-        URL.documentsDirectory.appendingPathComponent(fileName)
+        directoryURL.appendingPathComponent(fileName)
     }
 
-    private static var legacyURL: URL {
-        URL.documentsDirectory.appendingPathComponent(legacyFileName)
+    private static var directoryURL: URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Pairing", isDirectory: true)
+    }
+
+    private static var legacyURLs: [URL] {
+        [
+            URL.documentsDirectory.appendingPathComponent(fileName),
+            URL.documentsDirectory.appendingPathComponent(legacyFileName)
+        ]
     }
 
     @discardableResult
     static func prepareURL(fileManager: FileManager = .default) -> URL {
         let destination = url
-        guard !fileManager.fileExists(atPath: destination.path),
-              fileManager.fileExists(atPath: legacyURL.path) else {
+        try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        guard !fileManager.fileExists(atPath: destination.path) else {
+            removeLegacyCopies(fileManager: fileManager)
             return destination
         }
 
-        do {
-            try fileManager.moveItem(at: legacyURL, to: destination)
-        } catch {
-            if let data = try? Data(contentsOf: legacyURL) {
-                try? data.write(to: destination, options: .atomic)
-                try? fileManager.removeItem(at: legacyURL)
+        for legacyURL in legacyURLs where fileManager.fileExists(atPath: legacyURL.path) {
+            do {
+                try fileManager.moveItem(at: legacyURL, to: destination)
+            } catch {
+                if let data = try? Data(contentsOf: legacyURL) {
+                    try? data.write(to: destination, options: .atomic)
+                    try? fileManager.removeItem(at: legacyURL)
+                }
             }
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            break
         }
 
         return destination
@@ -58,9 +73,7 @@ enum PairingFileStore {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
-        if fileManager.fileExists(atPath: legacyURL.path) {
-            try? fileManager.removeItem(at: legacyURL)
-        }
+        removeLegacyCopies(fileManager: fileManager)
         try fileManager.copyItem(at: sourceURL, to: destination)
         try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
@@ -85,7 +98,11 @@ enum PairingFileStore {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
-        if fileManager.fileExists(atPath: legacyURL.path) {
+        removeLegacyCopies(fileManager: fileManager)
+    }
+
+    private static func removeLegacyCopies(fileManager: FileManager) {
+        for legacyURL in legacyURLs where fileManager.fileExists(atPath: legacyURL.path) {
             try? fileManager.removeItem(at: legacyURL)
         }
     }
@@ -131,6 +148,9 @@ enum ScriptStore {
     }
 
     static func scriptURL(named scriptName: String, fileManager: FileManager = .default) throws -> URL {
+        guard let scriptName = normalizedScriptFileName(scriptName) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
         let directory = try prepareDirectory(fileManager: fileManager)
         return directory.appendingPathComponent(scriptName)
     }
@@ -141,8 +161,8 @@ enum ScriptStore {
 
     static func updateAssignedScriptName(_ scriptName: String?, for bundleID: String, defaults: UserDefaults = .standard) {
         var mapping = assignedScriptMap(defaults: defaults)
-        if let scriptName {
-            mapping[bundleID] = scriptName
+        if let scriptName, let normalizedName = normalizedScriptFileName(scriptName) {
+            mapping[bundleID] = normalizedName
         } else {
             mapping.removeValue(forKey: bundleID)
         }
@@ -208,7 +228,28 @@ enum ScriptStore {
     }
 
     private static func assignedScriptMap(defaults: UserDefaults) -> [String: String] {
-        defaults.dictionary(forKey: assignmentKey) as? [String: String] ?? [:]
+        let rawMap = defaults.dictionary(forKey: assignmentKey) as? [String: String] ?? [:]
+        return rawMap.compactMapValues(normalizedScriptFileName)
+    }
+
+    static func normalizedScriptFileName(_ candidate: String) -> String? {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains("\0") else {
+            return nil
+        }
+
+        let fileName = URL(fileURLWithPath: trimmed).lastPathComponent
+        guard fileName == trimmed,
+              fileName != ".",
+              fileName != "..",
+              URL(fileURLWithPath: fileName).pathExtension.lowercased() == "js" else {
+            return nil
+        }
+
+        return fileName
     }
 }
 
