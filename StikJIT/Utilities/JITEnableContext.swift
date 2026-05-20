@@ -73,7 +73,7 @@ final class JITEnableContext {
 
     private func makeError(_ message: String, code: Int = -1) -> NSError {
         NSError(
-            domain: "StikJIT",
+            domain: "StikDebug",
             code: code,
             userInfo: [NSLocalizedDescriptionKey: message]
         )
@@ -469,7 +469,7 @@ final class JITEnableContext {
             makeClient: { [weak self] in
                 guard let self else {
                     throw NSError(
-                        domain: "StikJIT",
+                        domain: "StikDebug",
                         code: -1,
                         userInfo: [NSLocalizedDescriptionKey: "Debug heartbeat context is unavailable"]
                     )
@@ -496,7 +496,7 @@ final class JITEnableContext {
             },
             errorBuilder: { [weak self] ffiError, fallback in
                 self?.error(from: ffiError, fallback: fallback) ?? NSError(
-                    domain: "StikJIT",
+                    domain: "StikDebug",
                     code: -1,
                     userInfo: [NSLocalizedDescriptionKey: fallback]
                 )

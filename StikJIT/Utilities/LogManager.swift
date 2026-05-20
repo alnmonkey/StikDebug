@@ -42,7 +42,7 @@ final class LogManager: ObservableObject {
     ]
 
     private init() {
-        addInfoLog("StikJIT starting up")
+        addInfoLog("StikDebug starting up")
         addInfoLog("Initializing environment")
     }
 
